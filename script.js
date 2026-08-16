@@ -760,9 +760,8 @@ function stopReading() {
 // ===============================
 // CELL BUBBLE HELPERS (media + written content)
 // ===============================
-// NOTE: audio overlap (the Overlap dial) is independent of this — audios
-// can still overlap in the background per the max-concurrent-audio
-// watcher below. This only governs what's visually on screen.
+// True when the Overlap dial is on (>0s) — this is what turns on the
+// "multiple bubbles can be on screen, stacked left-to-right" behavior.
 function isOverlapModeOn() {
   const v = parseFloat(document.getElementById("overlapDelay")?.value || "0");
   return v > 0;
@@ -774,19 +773,21 @@ function getCellCleanText(cell) {
 }
 
 // Builds and shows one bubble (media on top, written content underneath,
-// same look/position as the existing media popup). Only ONE bubble is
-// ever visible at a time — presenting a new one always replaces whatever
-// is currently showing, even while overlap audio from an earlier cell is
-// still playing in the background. (That background audio is not paused
-// here — it just loses its visual bubble; see the max-concurrent-audio
-// watcher at the bottom of this file for when it actually gets cut off.)
+// same look/position as the existing media popup). When overlap is off,
+// this replaces whatever bubble is currently showing (original behavior).
+// When overlap is on, up to 2 bubbles can be visible at once; the oldest
+// is dropped to make room and the newest bubble stacks to the right.
 function presentCellBubble(cell, { images = [], videos = [], text = "" } = {}) {
   const container = document.getElementById("mediaPopup");
   if (!container) return null;
   if (!images.length && !videos.length && !text) return null;
 
-  while (container.firstChild) {
-    container.removeChild(container.firstChild);
+  if (!isOverlapModeOn()) {
+    container.innerHTML = "";
+  } else {
+    while (container.children.length >= 2) {
+      container.removeChild(container.firstElementChild);
+    }
   }
 
   const group = document.createElement("div");
@@ -897,20 +898,18 @@ function playCellMedia(cell, overlapMs) {
       return resolve({ hasAudio: false, hasImage: false, bubbleGroup: bubble ? bubble.group : null });
     }
 
-    // BUGFIX: cells with an image/video but no audio file used to tear
-    // the bubble down after a flat 300ms, regardless of whether speech
-    // synthesis was about to read the cell's text out loud — so the
-    // picture would vanish almost immediately while the voice kept
-    // talking. Now this behaves just like a text-only cell: hand the
-    // bubble back to the caller (the reading engine) so it stays on
-    // screen for as long as speak() is running, and only gets closed
-    // once that cell's turn is actually done.
+    // If only image/video but no audio, do not block long
     if (!audios.length) {
-      return resolve({
-        hasAudio: false,
-        hasImage: images.length > 0,
-        bubbleGroup: bubble ? bubble.group : null
-      });
+      setTimeout(() => {
+        if (bubble) removeBubbleGroup(bubble.group);
+        resolve({
+          hasAudio: false,
+          hasImage: images.length > 0,
+          bubbleGroup: null
+        });
+      }, 300);
+
+      return;
     }
 
     // Accumulate into the shared, page-level list rather than
@@ -1217,17 +1216,10 @@ async function startReading() {
               // - text exists
               if (!mediaResult.hasAudio && lang !== "Off" && cleanText) {
                 await speak(cleanText, lang, getSpeed(), cell);
-              } else if (mediaResult.bubbleGroup && !mediaResult.hasAudio) {
-                // Image/video-only cell with no text to speak: nothing
-                // else keeps the bubble up, so give it a short, fixed
-                // moment on screen instead of it flashing and vanishing
-                // the instant it appears.
-                await new Promise(r => setTimeout(r, 900));
               }
 
-              // Text-only (and image/video-only) cells hand their bubble
-              // back to us via bubbleGroup — remove it now that this
-              // cell's turn is actually done.
+              // Text-only cells (no media) hand their bubble back to us
+              // via bubbleGroup — remove it now that this cell's turn is done.
               if (mediaResult.bubbleGroup) removeBubbleGroup(mediaResult.bubbleGroup);
 
               cell.classList.remove("reading");
@@ -2454,7 +2446,7 @@ function extractRange(mode) {
 // currently-playing audio is stopped and dropped.
 // ===============================
 (function () {
-  const MAX_CONCURRENT_AUDIO = 2; // change this number to taste
+  const MAX_CONCURRENT_AUDIO = 3; // change this number to taste
 
   setInterval(() => {
     const list = window.currentMediaElements;
